@@ -96,13 +96,16 @@ def main(ctx_factory=cl.create_some_context, use_profiling=False, use_logmgr=Fal
     nstatus = 1
     nviz = 1
     rank = 0
+    mu = 1.0
     checkpoint_t = current_t
     current_step = 0
     timestepper = rk4_step
     left_boundary_location = 0
     right_boundary_location = 0.1
-    box_ll = (left_boundary_location, 0.0)
-    box_ur = (right_boundary_location, 0.02)
+    y0 = 0.0
+    ytop = 0.02
+    box_ll = (left_boundary_location, y0)
+    box_ur = (right_boundary_location, ytop)
     npts_axis = (50, 30)
     rank = comm.Get_rank()
 
@@ -121,31 +124,58 @@ def main(ctx_factory=cl.create_some_context, use_profiling=False, use_logmgr=Fal
     base_pressure = 100000.0
     pressure_ratio = 1.001
 
-    def poiseuille_soln(nodes, eos, cv=None, **kwargs):
-        dim = len(nodes)
+    def poiseuille_exact(nodes, eos):
+        y = nodes[1]
+        x = nodes[0]
+        x0 = left_boundary_location
+        xmax = right_boundary_location
+        xlen = xmax - x0
+        p_low = base_pressure
+        p_hi = pressure_ratio*base_pressure
+        dp = p_hi - p_low
+        dpdx = dp/xlen
+        h = ytop - y0
+        u_y = dpdx*y*(h - y)/(2*mu)
+        p_x = p_hi - dpdx*x
+        rho = 1.0
+        mass = 0*x + rho
+        u_x = 0*x
+        velocity = make_obj_array([u_x, u_y])
+        ke = .5*np.dot(velocity, velocity)*mass
+        gamma = eos.gamma()
+        rho_e = p_x/(gamma-1) + ke
+        return make_conserved(2, mass=mass, energy=rho_e,
+                              momentum=mass*velocity)
+
+    def poiseuille_boundary(nodes, eos, cv=None, **kwargs):
         x0 = left_boundary_location
         xmax = right_boundary_location
         xlen = xmax - x0
         p0 = base_pressure
         p1 = pressure_ratio*p0
-        p_x = p1 + p0*(1 - pressure_ratio)*(nodes[0] - x0)/xlen
+        dpdx = (p1 - p0)/xlen
+        p_x = p1 - dpdx*nodes[0]
         ke = 0
-        mass = nodes[0] + 1.0 - nodes[0]
-        momentum = make_obj_array([0*mass for i in range(dim)])
+        mass = 0*nodes[0] + 1.0
+        momentum = make_obj_array([0*mass for i in range(2)])
+
         if cv is not None:
             mass = cv.mass
             momentum = cv.momentum
             ke = .5*np.dot(cv.momentum, cv.momentum)/cv.mass
+
         energy_bc = p_x / (eos.gamma() - 1) + ke
-        return make_conserved(dim, mass=mass, energy=energy_bc,
+        return make_conserved(2, mass=mass, energy=energy_bc,
                               momentum=momentum)
 
-    initializer = poiseuille_soln
-    boundaries = {DTAG_BOUNDARY("-1"): PrescribedViscousBoundary(q_func=initializer),
-                  DTAG_BOUNDARY("+1"): PrescribedViscousBoundary(q_func=initializer),
+    bc_func = poiseuille_boundary
+    initializer = poiseuille_exact
+
+    boundaries = {DTAG_BOUNDARY("-1"): PrescribedViscousBoundary(q_func=bc_func),
+                  DTAG_BOUNDARY("+1"): PrescribedViscousBoundary(q_func=bc_func),
                   DTAG_BOUNDARY("-2"): IsothermalNoSlipBoundary(),
                   DTAG_BOUNDARY("+2"): IsothermalNoSlipBoundary()}
-    eos = IdealSingleGas(transport_model=SimpleTransport(viscosity=1.0))
+    eos = IdealSingleGas(transport_model=SimpleTransport(viscosity=mu))
 
     current_state = initializer(nodes, eos)
 
